@@ -47,9 +47,7 @@ class HarmonyDeviceConnector:
     def suspend(self) -> None:
         self.cmd("power-shell suspend")
 
-    def recv_file(
-        self, device_filepath: str, host_filepath: Optional[str] = None
-    ) -> None:
+    def recv_file(self, device_filepath: str, host_filepath: Optional[str] = None) -> None:
         cmd = [self.hdc_path, "file", "recv", device_filepath]
         if host_filepath is not None:
             cmd.append(host_filepath)
@@ -100,7 +98,10 @@ class HarmonyDevicePerfMode:
         self.hdc.wakeup()
 
     def __exit__(
-        self, exception_type: Any, exception_value: Any, exception_traceback: Any # noqa: ANN401
+        self,
+        exception_type: Any,
+        exception_value: Any,
+        exception_traceback: Any,  # noqa: ANN401
     ) -> None:
         # Back to normal mode
         try:
