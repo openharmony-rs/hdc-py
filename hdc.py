@@ -3,6 +3,7 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+from os import PathLike
 from subprocess import CompletedProcess
 from typing import Optional, Any
 
@@ -19,8 +20,15 @@ class HarmonyDeviceConnector:
         hdc_path = pathlib.Path(hdc_path).resolve()
         return hdc_path
 
-    def __init__(self) -> None:
-        self.hdc_path = self._which_hdc()
+    def __init__(self, hdc_path: Optional[PathLike] = None) -> None:
+        if hdc_path is not None:
+            hdc_path_resolved = pathlib.Path(hdc_path).resolve()
+            if not hdc_path_resolved.exists():
+                raise ValueError(f"hdc_path={hdc_path} does not exist")
+            self.hdc_path = hdc_path_resolved
+        else:
+            self.hdc_path = self._which_hdc()
+
         self._wait()
 
     """Run `command` on the device. Pass additional arguments through to `subprocess.run`"""
