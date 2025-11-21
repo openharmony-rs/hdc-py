@@ -99,8 +99,8 @@ class HarmonyDevicePerfMode:
 
     def __exit__(
         self,
-        exception_type: Any,
-        exception_value: Any,
+        exception_type: Any,  # noqa: ANN401
+        exception_value: Any,  # noqa: ANN401
         exception_traceback: Any,  # noqa: ANN401
     ) -> None:
         # Back to normal mode
