@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "A python wrapper around the (Open-) Harmony device connector"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "Readme.md"
 dependencies = []
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -31,3 +33,8 @@ select = [
 dev = [
     "ruff>=0.14.5",
 ]
+
+[build-system]
+requires = ["uv_build >= 0.9.9, <0.10.0"]
+build-backend = "uv_build"
+
