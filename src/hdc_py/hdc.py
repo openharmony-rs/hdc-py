@@ -1,20 +1,40 @@
 import os
 import pathlib
+import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 from os import PathLike
 from subprocess import CompletedProcess
 from typing import Optional, Any
 
 
+def _is_wsl() -> bool:
+    return sys.platform == "linux" and platform.uname().release.endswith("microsoft-standard-WSL2")
+
 class HarmonyDeviceConnector:
     @staticmethod
     def _which_hdc() -> pathlib.Path:
         hdc_path = shutil.which("hdc")
+        if hdc_path is None and _is_wsl():
+            # When running python on windows, shutil will automatically consider the `.exe` suffix.
+            # However, on wsl this is not the case, but we can still use the windows `hdc.exe` executable.
+            hdc_path = shutil.which("hdc.exe")
+        if hdc_path is None and sys.platform == "win32":
+            # This environment variable is setup by DevEco Studio after installation.
+            deveco_bin = os.getenv("DevEco Studio")
+            if deveco_bin is not None:
+                deveco_bin = pathlib.Path(deveco_bin)
+                dev_eco_hdc = deveco_bin.parent.joinpath("sdk", "default", "openharmony", "toolchains", "hdc.exe")
+                if dev_eco_hdc.is_file():
+                    hdc_path = dev_eco_hdc
+
         if hdc_path is None:
             ohos_sdk_native = os.getenv("OHOS_SDK_NATIVE")
-            assert ohos_sdk_native, "hdc not found in PATH and OHOS_SDK_NATIVE not set."
+            if ohos_sdk_native is None:
+                raise RuntimeError("`hdc` could not be found. Add `hdc` to PATH or construct HarmonyDeviceConnector"
+                                   "with an explicit path to the `hdc` executable.")
             hdc_path = os.path.join(ohos_sdk_native, "../", "toolchains", "hdc")
             assert pathlib.Path(hdc_path).exists()
         hdc_path = pathlib.Path(hdc_path).resolve()
