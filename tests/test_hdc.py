@@ -8,5 +8,5 @@ class TestHDC(unittest.TestCase):
         assert hdc is not None
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

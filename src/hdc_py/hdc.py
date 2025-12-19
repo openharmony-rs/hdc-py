@@ -13,6 +13,7 @@ from typing import Optional, Any
 def _is_wsl() -> bool:
     return sys.platform == "linux" and platform.uname().release.endswith("microsoft-standard-WSL2")
 
+
 class HarmonyDeviceConnector:
     @staticmethod
     def _which_hdc() -> pathlib.Path:
@@ -33,8 +34,10 @@ class HarmonyDeviceConnector:
         if hdc_path is None:
             ohos_sdk_native = os.getenv("OHOS_SDK_NATIVE")
             if ohos_sdk_native is None:
-                raise RuntimeError("`hdc` could not be found. Add `hdc` to PATH or construct HarmonyDeviceConnector"
-                                   "with an explicit path to the `hdc` executable.")
+                raise RuntimeError(
+                    "`hdc` could not be found. Add `hdc` to PATH or construct HarmonyDeviceConnector"
+                    "with an explicit path to the `hdc` executable."
+                )
             hdc_path = os.path.join(ohos_sdk_native, "../", "toolchains", "hdc")
             assert pathlib.Path(hdc_path).exists()
         hdc_path = pathlib.Path(hdc_path).resolve()
