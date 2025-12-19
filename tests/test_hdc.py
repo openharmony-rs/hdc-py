@@ -3,7 +3,7 @@ from hdc import HarmonyDeviceConnector
 
 
 class TestHDC(unittest.TestCase):
-    def test_hdc_py(self):
+    def test_hdc_py(self) -> None:
         hdc = HarmonyDeviceConnector()
         assert hdc is not None
 
