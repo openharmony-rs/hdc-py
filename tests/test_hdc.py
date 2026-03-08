@@ -1,5 +1,5 @@
 import unittest
-from hdc import HarmonyDeviceConnector
+from hdc_py import HarmonyDeviceConnector
 
 
 class TestHDC(unittest.TestCase):
