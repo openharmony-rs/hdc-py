@@ -1,16 +1,20 @@
 name: Code Quality
 on:
-  - push
-  - pull_request
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
 
 jobs:
-
   lint:
     name: python
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: astral-sh/ruff-action@v3
         name: Install ruff and run ruff check
       - run: ruff format --diff

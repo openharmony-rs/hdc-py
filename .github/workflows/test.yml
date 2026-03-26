@@ -1,0 +1,75 @@
+name: Test
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+
+  emulator-tests:
+    name: oniro emulator
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Python 3.11
+        run: uv python install 3.11
+
+      - name: Restore cached hdc toolchain
+        id: cache-hdc
+        uses: actions/cache@v4
+        with:
+          path: .cache/ohos-hdc
+          key: ${{ runner.os }}-ohos-hdc-6.0
+
+      - name: Setup OpenHarmony SDK
+        if: steps.cache-hdc.outputs.cache-hit != 'true'
+        id: setup-ohos-sdk
+        uses: openharmony-rs/setup-ohos-sdk@fix-no-native
+        with:
+          version: "6.0"
+          components: toolchains
+          cache: false
+          mirror: true
+
+      - name: Prepare cached hdc toolchain
+        if: steps.cache-hdc.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache_dir="${GITHUB_WORKSPACE}/.cache/ohos-hdc"
+          toolchains_dir="${{ steps.setup-ohos-sdk.outputs.sdk-path }}/linux/toolchains"
+          mkdir -p "${cache_dir}"
+          cp "${toolchains_dir}/hdc" "${toolchains_dir}"/libusb_shared.so "${cache_dir}/."
+
+      - name: Export cached hdc toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache_dir="${GITHUB_WORKSPACE}/.cache/ohos-hdc"
+          if [[ ! -x "${cache_dir}/hdc" ]]; then
+            echo "Cached hdc binary not found at ${cache_dir}/hdc" >&2
+            exit 1
+          fi
+          echo "${cache_dir}" >> "${GITHUB_PATH}"
+
+      - name: Start Oniro emulator
+        id: emulator
+        uses: ./.github/actions/setup-oniro-emulator
+        with:
+          start: true
+
+      - name: Run Python tests against the emulator
+        run: PYTHONPATH=src uv run pytest -q tests
+
+      - name: Stop Oniro emulator
+        if: always()
+        run: python3 scripts/oniro_emulator.py teardown --state-file "${{ steps.emulator.outputs.state-file }}"
