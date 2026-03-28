@@ -35,10 +35,13 @@ runs:
         archive_path="${work_dir}/oniro_emulator.zip"
         mkdir -p "${work_dir}"
         curl -L --fail --output "${archive_path}" "https://github.com/eclipse-oniro4openharmony/device_board_oniro/releases/download/v6.0/oniro_emulator.zip"
-        cd "${work_dir}"
-        unzip "${archive_path}"
-        # Todo: verify presence of required files, e.g. system.img in the emulator-image-directory
-        echo emulator-image-directory="${work_dir}/oniro_emulator/images" >> "${GITHUB_OUTPUT}"
+        unzip "${archive_path}" -d "${work_dir}"
+        emulator_image_directory="${work_dir}/images"
+        if [[ ! -f "${emulator_image_directory}/run.sh" ]]; then
+          echo "Expected emulator images in ${emulator_image_directory}, but run.sh was not found." >&2
+          exit 1
+        fi
+        echo "emulator-image-directory=${emulator_image_directory}" >> "${GITHUB_OUTPUT}"
 
     - name: Start oniro emulator
       if: inputs.start == 'true'
