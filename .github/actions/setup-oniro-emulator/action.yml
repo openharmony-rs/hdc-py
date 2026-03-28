@@ -76,6 +76,16 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        timeout 120s bash -c 'while ! nc -z localhost 55555; do sleep 1; done'
-        echo "Emulator started"
-        hdc tconn 127.0.0.1:55555 | grep -e "Connect OK" -e "Target is connected"
+        for _ in $(seq 1 120); do
+          if nc -z localhost 55555; then
+            tconn_output="$(hdc tconn 127.0.0.1:55555 2>&1 || true)"
+            if printf '%s\n' "${tconn_output}" | grep -q -e "Connect OK" -e "Target is connected"; then
+              echo "Emulator started"
+              exit 0
+            fi
+          fi
+          sleep 1
+        done
+
+        echo "Error: emulator did not become ready within 120 seconds." >&2
+        exit 1

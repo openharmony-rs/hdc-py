@@ -45,7 +45,8 @@ for _ in $(seq 1 50); do
     rm -f "$pid_file"
     exit 1
   fi
-  if hdc tconn "$connect_key" >/dev/null 2>&1; then
+  tconn_output="$(hdc tconn "$connect_key" 2>&1 || true)"
+  if [[ "$tconn_output" == "Connect OK" || "$tconn_output" == *"Target is connected"* ]]; then
     echo "Connected to Oniro emulator via HDC."
     exit 0
   fi

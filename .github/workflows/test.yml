@@ -69,7 +69,3 @@ jobs:
 
       - name: Run Python tests against the emulator
         run: PYTHONPATH=src uv run pytest -q tests
-
-      - name: Stop Oniro emulator
-        if: always()
-        run: python3 scripts/oniro_emulator.py teardown --state-file "${{ steps.emulator.outputs.state-file }}"
