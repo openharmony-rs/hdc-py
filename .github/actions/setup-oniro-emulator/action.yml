@@ -1,0 +1,91 @@
+name: Setup Oniro Emulator
+description: Download the Oniro emulator for CI and optionally start it.
+
+inputs:
+  start:
+    description: Start the emulator after downloading and extracting it.
+    required: false
+    default: "true"
+
+outputs:
+  emulator-image-directory:
+    description: Directory where the emulator images are stored.
+    value: ${{ steps.download.outputs.emulator-image-directory }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install QEMU
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v qemu-system-x86_64 >/dev/null 2>&1; then
+          exit 0
+        fi
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-x86
+
+    - name: Download oniro emulator
+      id: download
+      shell: bash
+      run: |
+        set -euo pipefail
+        work_dir="${RUNNER_TEMP}/oniro-emulator"
+        archive_path="${work_dir}/oniro_emulator.zip"
+        mkdir -p "${work_dir}"
+        curl -L --fail --output "${archive_path}" "https://github.com/eclipse-oniro4openharmony/device_board_oniro/releases/download/v6.0/oniro_emulator.zip"
+        unzip "${archive_path}" -d "${work_dir}"
+        emulator_image_directory="${work_dir}/images"
+        if [[ ! -f "${emulator_image_directory}/run.sh" ]]; then
+          echo "Expected emulator images in ${emulator_image_directory}, but run.sh was not found." >&2
+          exit 1
+        fi
+        echo "emulator-image-directory=${emulator_image_directory}" >> "${GITHUB_OUTPUT}"
+
+    - name: Start oniro emulator
+      if: inputs.start == 'true'
+      id: start
+      working-directory: ${{ steps.download.outputs.emulator-image-directory }}
+      shell: bash
+      run: |
+        # based on run.sh of the oniro emulator 6.0 release, with display related options removed
+        # and KVM disabled.
+        qemu-system-x86_64 -machine q35 \
+          -smp 6 \
+          -m 4096M \
+          -boot c \
+          -nographic \
+          -vga none \
+          -rtc base=utc,clock=host \
+          -initrd ramdisk.img \
+          -kernel bzImage \
+          -drive if=none,file=updater.img,format=raw,id=updater,index=0 \
+          -device virtio-blk-pci,drive=updater \
+          -drive if=none,file=system.img,format=raw,id=system,index=1 \
+          -device virtio-blk-pci,drive=system \
+          -drive if=none,file=vendor.img,format=raw,id=vendor,index=2 \
+          -device virtio-blk-pci,drive=vendor \
+          -drive if=none,file=userdata.img,format=raw,id=userdata,index=3 \
+          -device virtio-blk-pci,drive=userdata \
+          -append "ip=dhcp loglevel=4 console=ttyS0,115200 init=init root=/dev/ram0 rw  ohos.boot.hardware=x86_general ohos.required_mount.system=/dev/block/vdb@/usr@ext4@ro,barrier=1@wait,required ohos.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrier=1@wait,required ohos.required_mount.misc=/dev/block/vda@/misc@none@none=@wait,required" \
+          -netdev user,id=net0,hostfwd=tcp::55555-:55555 \
+          -device virtio-net-pci,netdev=net0 &
+    - name: Wait for emulator to start
+      if: inputs.start == 'true' && steps.start.outcome == 'success'
+      shell: bash
+      run: |
+        set -euo pipefail
+        for _ in $(seq 1 120); do
+          if nc -z localhost 55555; then
+            tconn_output="$(hdc tconn 127.0.0.1:55555 2>&1 || true)"
+            if printf '%s\n' "${tconn_output}" | grep -q -e "Connect OK" -e "Target is connected"; then
+              echo "Emulator started"
+              exit 0
+            fi
+          fi
+          sleep 1
+        done
+
+        echo "Error: emulator did not become ready within 120 seconds." >&2
+        exit 1
