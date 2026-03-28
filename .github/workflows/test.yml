@@ -33,7 +33,7 @@ jobs:
       - name: Setup OpenHarmony SDK
         if: steps.cache-hdc.outputs.cache-hit != 'true'
         id: setup-ohos-sdk
-        uses: openharmony-rs/setup-ohos-sdk@fix-no-native
+        uses: openharmony-rs/setup-ohos-sdk@c98b7bceea3bf63600b2532b0c52ec08845dbb8e
         with:
           version: "6.0"
           components: toolchains
