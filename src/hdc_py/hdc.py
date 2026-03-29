@@ -8,6 +8,7 @@ import string
 import subprocess
 import sys
 import tempfile
+import uuid
 from os import PathLike
 from pathlib import PurePosixPath
 from subprocess import CompletedProcess
@@ -23,6 +24,7 @@ def _is_wsl() -> bool:
 
 class HarmonyDeviceConnector:
     _DEVICE_HASH_COMMAND = "openssl dgst -sha256 {path}"
+    _DEVICE_TMP_DIR = "/data/local/tmp"
 
     @staticmethod
     def _which_hdc() -> pathlib.Path:
@@ -63,11 +65,64 @@ class HarmonyDeviceConnector:
 
         self._wait()
 
-    """Run `command` on the device. Pass additional arguments through to `subprocess.run`"""
+    def _device_temp_path(self, prefix: str) -> str:
+        return f"{self._DEVICE_TMP_DIR}/{prefix}-{uuid.uuid4().hex}"
+
+    def _cleanup_device_file(self, device_filepath: str) -> None:
+        quoted_path = shlex.quote(device_filepath)
+        subprocess.run([self.hdc_path, "shell", f"rm -f {quoted_path}"], check=False, capture_output=True, text=True)
+
+    def _read_device_exit_code(self, device_filepath: str) -> int:
+        quoted_path = shlex.quote(device_filepath)
+        result = subprocess.run([self.hdc_path, "shell", f"cat {quoted_path}"], capture_output=True, text=True)
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        for line in reversed(output.splitlines()):
+            stripped = line.strip()
+            if stripped.lstrip("-").isdigit():
+                return int(stripped)
+        raise RuntimeError(f"Could not read device exit code from {device_filepath!r}")
 
     def cmd(self, command: str, **kwargs) -> CompletedProcess:  # noqa: ANN003
+        """Run `command` on the device. Pass additional arguments through to `subprocess.run`
+
+        The return code will be the actual return code of the command executed on the device.
+        """
+
+        check = kwargs.pop("check", True)
         print(f"Executing hdc command: {command}")
-        return subprocess.run([self.hdc_path, "shell", command], check=True, **kwargs)
+
+        exit_code_file = self._device_temp_path("hdc-py-exit-code")
+        quoted_exit_code_file = shlex.quote(exit_code_file)
+        wrapped_command = (
+            f"rm -f {quoted_exit_code_file}; "
+            f"sh -c {shlex.quote(command)}; "
+            f"hdc_py_rc=$?; printf '%s' \"$hdc_py_rc\" > {quoted_exit_code_file}"
+        )
+        result = subprocess.run([self.hdc_path, "shell", wrapped_command], check=False, **kwargs)
+        if result.returncode != 0:
+            if check:
+                raise subprocess.CalledProcessError(
+                    result.returncode,
+                    result.args,
+                    output=result.stdout,
+                    stderr=result.stderr,
+                )
+            return result
+
+        try:
+            device_returncode = self._read_device_exit_code(exit_code_file)
+        finally:
+            self._cleanup_device_file(exit_code_file)
+
+        completed = CompletedProcess(result.args, device_returncode, result.stdout, result.stderr)
+        if check and completed.returncode != 0:
+            raise subprocess.CalledProcessError(
+                completed.returncode,
+                completed.args,
+                output=completed.stdout,
+                stderr=completed.stderr,
+            )
+        return completed
 
     def _wait(self, timeout: float = 5) -> None:
         try:
