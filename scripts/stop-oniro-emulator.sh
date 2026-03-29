@@ -2,6 +2,7 @@
 set -euo pipefail
 
 pid_file="/tmp/oniro-emulator.pid"
+connect_file="/tmp/oniro-emulator.connect"
 
 if [ ! -f "$pid_file" ]; then
   echo "Error: emulator pid file not found at $pid_file."
@@ -13,16 +14,16 @@ emulator_pid="$(cat "$pid_file")"
 
 if ! kill -0 "$emulator_pid" >/dev/null 2>&1; then
   echo "Emulator process $emulator_pid is not running. Removing stale pid file."
-  rm -f "$pid_file"
+  rm -f "$pid_file" "$connect_file"
   exit 0
 fi
 
-echo "Stopping Oniro emulator process group $emulator_pid..."
-kill -TERM -- "-$emulator_pid" >/dev/null 2>&1 || kill -TERM "$emulator_pid" >/dev/null 2>&1 || true
+echo "Stopping Oniro emulator process $emulator_pid..."
+kill -TERM "$emulator_pid" >/dev/null 2>&1 || true
 
 for _ in $(seq 1 10); do
   if ! kill -0 "$emulator_pid" >/dev/null 2>&1; then
-    rm -f "$pid_file"
+    rm -f "$pid_file" "$connect_file"
     echo "Oniro emulator stopped."
     exit 0
   fi
@@ -30,6 +31,6 @@ for _ in $(seq 1 10); do
 done
 
 echo "Emulator did not exit after SIGTERM. Sending SIGKILL."
-kill -KILL -- "-$emulator_pid" >/dev/null 2>&1 || kill -KILL "$emulator_pid" >/dev/null 2>&1 || true
-rm -f "$pid_file"
+kill -KILL "$emulator_pid" >/dev/null 2>&1 || true
+rm -f "$pid_file" "$connect_file"
 echo "Oniro emulator stopped."
