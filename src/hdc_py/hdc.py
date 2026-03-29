@@ -1,13 +1,20 @@
+import hashlib
 import os
 import pathlib
 import platform
+import shlex
 import shutil
+import string
 import subprocess
 import sys
 import tempfile
 from os import PathLike
+from pathlib import PurePosixPath
 from subprocess import CompletedProcess
 from typing import Optional, Any
+
+
+_HASH_BUFFER_SIZE = 1024 * 1024
 
 
 def _is_wsl() -> bool:
@@ -15,6 +22,8 @@ def _is_wsl() -> bool:
 
 
 class HarmonyDeviceConnector:
+    _DEVICE_HASH_COMMAND = "openssl dgst -sha256 {path}"
+
     @staticmethod
     def _which_hdc() -> pathlib.Path:
         hdc_path = shutil.which("hdc")
@@ -78,17 +87,126 @@ class HarmonyDeviceConnector:
     def suspend(self) -> None:
         self.cmd("power-shell suspend")
 
+    @staticmethod
+    def _host_file_hash(host_filepath: PathLike[str] | str, algorithm: str) -> str:
+        digest = hashlib.new(algorithm)
+        with open(host_filepath, mode="rb") as file:
+            for chunk in iter(lambda: file.read(_HASH_BUFFER_SIZE), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _extract_hash(output: str) -> Optional[str]:
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if "=" in stripped:
+                candidate = stripped.rsplit("=", maxsplit=1)[1].strip().split()[0]
+            else:
+                candidate = stripped.split()[0]
+            if candidate and all(character in string.hexdigits for character in candidate):
+                return candidate.lower()
+        return None
+
+    @staticmethod
+    def _verify_matching_hashes(
+        source_path: PathLike[str] | str,
+        target_path: str,
+        algorithm: str,
+        source_hash: str,
+        target_hash: str,
+    ) -> None:
+        if source_hash != target_hash:
+            raise RuntimeError(
+                "File transfer verification failed: "
+                f"{algorithm} mismatch for host={source_path} and device={target_path} "
+                f"({source_hash} != {target_hash})"
+            )
+
+    @staticmethod
+    def _resolve_recv_target_path(device_filepath: str, host_filepath: Optional[str]) -> pathlib.Path:
+        device_name = PurePosixPath(device_filepath).name
+        if not device_name:
+            raise ValueError(f"Could not resolve a local filename for device path {device_filepath!r}")
+        if host_filepath is None:
+            return pathlib.Path.cwd() / device_name
+        host_path = pathlib.Path(host_filepath)
+        if host_path.exists() and host_path.is_dir():
+            return host_path / device_name
+        return host_path
+
+    def _device_file_exists(self, device_filepath: str) -> bool:
+        quoted_path = shlex.quote(device_filepath)
+        result = subprocess.run(
+            [
+                self.hdc_path,
+                "shell",
+                f"if [ -f {quoted_path} ]; then echo __HDC_EXISTS__; else echo __HDC_MISSING__; fi",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        if "__HDC_EXISTS__" in output:
+            return True
+        if "__HDC_MISSING__" in output:
+            return False
+        raise RuntimeError(f"Could not determine whether device file {device_filepath!r} exists")
+
+    def _device_file_hash(self, device_filepath: str) -> str:
+        algorithm = "sha256"
+        template = self._DEVICE_HASH_COMMAND
+
+        if not self._device_file_exists(device_filepath):
+            raise FileNotFoundError(f"Device file {device_filepath!r} does not exist")
+
+        quoted_path = shlex.quote(device_filepath)
+        result = subprocess.run(
+            [self.hdc_path, "shell", template.format(path=quoted_path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to compute {algorithm} digest for device file {device_filepath}")
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        digest = self._extract_hash(output)
+        if digest is None:
+            raise RuntimeError(f"Could not parse {algorithm} digest for device file {device_filepath}")
+        return digest
+
+    def _host_and_device_hashes(self, host_filepath: PathLike[str] | str, device_filepath: str) -> tuple[str, str, str]:
+        algorithm = "sha256"
+        device_hash = self._device_file_hash(device_filepath)
+        host_hash = self._host_file_hash(host_filepath, algorithm)
+        return algorithm, host_hash, device_hash
+
     def recv_file(self, device_filepath: str, host_filepath: Optional[str] = None) -> None:
+        if not self._device_file_exists(device_filepath):
+            raise FileNotFoundError(f"Device file {device_filepath!r} does not exist")
+
+        resolved_host_path = self._resolve_recv_target_path(device_filepath, host_filepath)
+        if resolved_host_path.exists() and resolved_host_path.is_file():
+            algorithm, host_hash, device_hash = self._host_and_device_hashes(resolved_host_path, device_filepath)
+            if host_hash == device_hash:
+                return
+
         cmd = [self.hdc_path, "file", "recv", device_filepath]
         if host_filepath is not None:
             cmd.append(host_filepath)
-        subprocess.run(cmd)
+        subprocess.run(cmd, check=True)
+
+        algorithm, host_hash, device_hash = self._host_and_device_hashes(resolved_host_path, device_filepath)
+        self._verify_matching_hashes(resolved_host_path, device_filepath, algorithm, host_hash, device_hash)
 
     def read_file(self, device_filepath: str) -> Optional[str]:
         with tempfile.TemporaryDirectory() as temp_dir:
             assert pathlib.Path(temp_dir).exists()
             host_file = temp_dir + "/servo.log"
-            self.recv_file(device_filepath, host_file)
+            try:
+                self.recv_file(device_filepath, host_file)
+            except FileNotFoundError:
+                return None
             if pathlib.Path(host_file).exists():
                 with open(host_file, mode="r", encoding="utf-8") as logfile:
                     return logfile.read()
@@ -96,7 +214,19 @@ class HarmonyDeviceConnector:
                 return None
 
     def send_file(self, host_filepath: str, device_filepath: str) -> None:
-        subprocess.run([self.hdc_path, "file", "send", host_filepath, device_filepath])
+        host_path = pathlib.Path(host_filepath)
+        if not host_path.is_file():
+            raise FileNotFoundError(f"Host file {host_filepath!r} does not exist")
+
+        if self._device_file_exists(device_filepath):
+            algorithm, host_hash, device_hash = self._host_and_device_hashes(host_path, device_filepath)
+            if host_hash == device_hash:
+                return
+
+        subprocess.run([self.hdc_path, "file", "send", host_filepath, device_filepath], check=True)
+
+        algorithm, host_hash, device_hash = self._host_and_device_hashes(host_path, device_filepath)
+        self._verify_matching_hashes(host_path, device_filepath, algorithm, host_hash, device_hash)
 
     def screenshot(self, host_filepath: str) -> None:
         device_path = "/data/local/tmp/servo.jpeg"
