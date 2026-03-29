@@ -1,7 +1,10 @@
 import os
 from pathlib import Path
 import shlex
+import subprocess
 import uuid
+
+import pytest
 
 from hdc_py import HarmonyDeviceConnector, HarmonyDevicePerfMode
 
@@ -27,7 +30,23 @@ def test_connector_resolves_hdc_binary() -> None:
 def test_cmd_echo_roundtrip() -> None:
     hdc = HarmonyDeviceConnector()
     result = hdc.cmd("echo hello-world!", capture_output=True, text=True)
+    assert result.returncode == 0
     assert result.stdout.strip() == "hello-world!"
+
+
+def test_cmd_returns_real_device_exit_code_when_check_is_disabled() -> None:
+    hdc = HarmonyDeviceConnector()
+    result = hdc.cmd("echo failing-command; exit 23", capture_output=True, text=True, check=False)
+    assert result.returncode == 23
+    assert result.stdout.strip() == "failing-command"
+
+
+def test_cmd_raises_called_process_error_with_real_device_exit_code() -> None:
+    hdc = HarmonyDeviceConnector()
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        hdc.cmd("echo failing-command; exit 17", capture_output=True, text=True)
+    assert exc_info.value.returncode == 17
+    assert exc_info.value.output.strip() == "failing-command"
 
 
 def test_send_and_read_file_roundtrip(tmp_path: Path) -> None:
