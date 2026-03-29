@@ -12,7 +12,7 @@ import uuid
 from os import PathLike
 from pathlib import PurePosixPath
 from subprocess import CompletedProcess
-from typing import Optional, Any
+from typing import Any, Optional
 
 
 _HASH_BUFFER_SIZE = 1024 * 1024
@@ -22,38 +22,54 @@ def _is_wsl() -> bool:
     return sys.platform == "linux" and platform.uname().release.endswith("microsoft-standard-WSL2")
 
 
-class HarmonyDeviceConnector:
-    _DEVICE_HASH_COMMAND = "openssl dgst -sha256 {path}"
-    _DEVICE_TMP_DIR = "/data/local/tmp"
+def _which_hdc() -> pathlib.Path:
+    hdc_path = shutil.which("hdc")
+    if hdc_path is None and _is_wsl():
+        # When running python on windows, shutil will automatically consider the `.exe` suffix.
+        # However, on wsl this is not the case, but we can still use the windows `hdc.exe` executable.
+        hdc_path = shutil.which("hdc.exe")
+    if hdc_path is None and sys.platform == "win32":
+        # This environment variable is setup by DevEco Studio after installation.
+        deveco_bin = os.getenv("DevEco Studio")
+        if deveco_bin is not None:
+            deveco_bin = pathlib.Path(deveco_bin)
+            dev_eco_hdc = deveco_bin.parent.joinpath("sdk", "default", "openharmony", "toolchains", "hdc.exe")
+            if dev_eco_hdc.is_file():
+                hdc_path = dev_eco_hdc
 
-    @staticmethod
-    def _which_hdc() -> pathlib.Path:
-        hdc_path = shutil.which("hdc")
-        if hdc_path is None and _is_wsl():
-            # When running python on windows, shutil will automatically consider the `.exe` suffix.
-            # However, on wsl this is not the case, but we can still use the windows `hdc.exe` executable.
-            hdc_path = shutil.which("hdc.exe")
-        if hdc_path is None and sys.platform == "win32":
-            # This environment variable is setup by DevEco Studio after installation.
-            deveco_bin = os.getenv("DevEco Studio")
-            if deveco_bin is not None:
-                deveco_bin = pathlib.Path(deveco_bin)
-                dev_eco_hdc = deveco_bin.parent.joinpath("sdk", "default", "openharmony", "toolchains", "hdc.exe")
-                if dev_eco_hdc.is_file():
-                    hdc_path = dev_eco_hdc
+    if hdc_path is None:
+        ohos_sdk_native = os.getenv("OHOS_SDK_NATIVE")
+        if ohos_sdk_native is None:
+            raise RuntimeError(
+                "`hdc` could not be found. Add `hdc` to PATH or construct Hdc "
+                "with an explicit path to the `hdc` executable."
+            )
+        hdc_path = os.path.join(ohos_sdk_native, "../", "toolchains", "hdc")
+        assert pathlib.Path(hdc_path).exists()
+    return pathlib.Path(hdc_path).resolve()
 
-        if hdc_path is None:
-            ohos_sdk_native = os.getenv("OHOS_SDK_NATIVE")
-            if ohos_sdk_native is None:
-                raise RuntimeError(
-                    "`hdc` could not be found. Add `hdc` to PATH or construct HarmonyDeviceConnector"
-                    "with an explicit path to the `hdc` executable."
-                )
-            hdc_path = os.path.join(ohos_sdk_native, "../", "toolchains", "hdc")
-            assert pathlib.Path(hdc_path).exists()
-        hdc_path = pathlib.Path(hdc_path).resolve()
-        return hdc_path
 
+class HdcError(RuntimeError):
+    pass
+
+
+class HdcConnectionError(HdcError):
+    pass
+
+
+class HdcTargetNotFoundError(HdcConnectionError):
+    pass
+
+
+class HdcAmbiguousTargetError(HdcConnectionError):
+    pass
+
+
+class HdcDisconnectedError(HdcConnectionError):
+    pass
+
+
+class Hdc:
     def __init__(self, hdc_path: Optional[PathLike] = None) -> None:
         if hdc_path is not None:
             hdc_path_resolved = pathlib.Path(hdc_path).resolve()
@@ -61,20 +77,79 @@ class HarmonyDeviceConnector:
                 raise ValueError(f"hdc_path={hdc_path} does not exist")
             self.hdc_path = hdc_path_resolved
         else:
-            self.hdc_path = self._which_hdc()
+            self.hdc_path = _which_hdc()
 
-        self._wait()
+    def _run(self, args: list[str], **kwargs) -> CompletedProcess:  # noqa: ANN003
+        return subprocess.run([self.hdc_path, *args], **kwargs)
+
+    def wait(self, timeout: float = 5) -> None:
+        try:
+            self._run(["wait"], timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            print(f"Failed to find hdc device in {timeout} seconds")
+            raise e
+
+    def list_targets(self) -> list[str]:
+        result = self._run(["list", "targets"], check=True, capture_output=True, text=True)
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    def is_target_connected(self, target: str) -> bool:
+        return target in self.list_targets()
+
+    def connect(self, target: Optional[str] = None) -> "HarmonyDevice":
+        targets = self.list_targets()
+        if target is None:
+            if not targets:
+                raise HdcTargetNotFoundError("No connected hdc devices were found")
+            if len(targets) > 1:
+                raise HdcAmbiguousTargetError(
+                    "Multiple hdc devices are connected. Pass target=... to select one: " + ", ".join(targets)
+                )
+            target = targets[0]
+        elif target not in targets:
+            raise HdcTargetNotFoundError(f"Target {target!r} is not connected")
+        return HarmonyDevice(self, target)
+
+
+class HarmonyDevice:
+    _DEVICE_HASH_COMMAND = "openssl dgst -sha256 {path}"
+    _DEVICE_TMP_DIR = "/data/local/tmp"
+
+    def __init__(self, hdc: Hdc, target: str) -> None:
+        if not target:
+            raise ValueError("target must not be empty")
+        self.hdc = hdc
+        self.target = target
+
+    @property
+    def hdc_path(self) -> pathlib.Path:
+        return self.hdc.hdc_path
+
+    def _ensure_connected(self) -> None:
+        if not self.hdc.is_target_connected(self.target):
+            raise HdcDisconnectedError(f"Target {self.target!r} is no longer connected")
+
+    def _run_target(self, args: list[str], verify_connected: bool = True, **kwargs) -> CompletedProcess:  # noqa: ANN003
+        if verify_connected:
+            self._ensure_connected()
+        return subprocess.run([self.hdc_path, "-t", self.target, *args], **kwargs)
 
     def _device_temp_path(self, prefix: str) -> str:
         return f"{self._DEVICE_TMP_DIR}/{prefix}-{uuid.uuid4().hex}"
 
     def _cleanup_device_file(self, device_filepath: str) -> None:
         quoted_path = shlex.quote(device_filepath)
-        subprocess.run([self.hdc_path, "shell", f"rm -f {quoted_path}"], check=False, capture_output=True, text=True)
+        self._run_target(
+            ["shell", f"rm -f {quoted_path}"],
+            verify_connected=False,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
 
     def _read_device_exit_code(self, device_filepath: str) -> int:
         quoted_path = shlex.quote(device_filepath)
-        result = subprocess.run([self.hdc_path, "shell", f"cat {quoted_path}"], capture_output=True, text=True)
+        result = self._run_target(["shell", f"cat {quoted_path}"], capture_output=True, text=True)
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)
         for line in reversed(output.splitlines()):
             stripped = line.strip()
@@ -82,14 +157,11 @@ class HarmonyDeviceConnector:
                 return int(stripped)
         raise RuntimeError(f"Could not read device exit code from {device_filepath!r}")
 
+    """Run `command` on the device. Pass additional arguments through to `subprocess.run`"""
+
     def cmd(self, command: str, **kwargs) -> CompletedProcess:  # noqa: ANN003
-        """Run `command` on the device. Pass additional arguments through to `subprocess.run`
-
-        The return code will be the actual return code of the command executed on the device.
-        """
-
         check = kwargs.pop("check", True)
-        print(f"Executing hdc command: {command}")
+        print(f"Executing hdc command on {self.target}: {command}")
 
         exit_code_file = self._device_temp_path("hdc-py-exit-code")
         quoted_exit_code_file = shlex.quote(exit_code_file)
@@ -98,23 +170,24 @@ class HarmonyDeviceConnector:
             f"sh -c {shlex.quote(command)}; "
             f"hdc_py_rc=$?; printf '%s' \"$hdc_py_rc\" > {quoted_exit_code_file}"
         )
-        result = subprocess.run([self.hdc_path, "shell", wrapped_command], check=False, **kwargs)
+        result = self._run_target(["shell", wrapped_command], check=False, **kwargs)
+        cmd_args = [self.hdc_path, "-t", self.target, "shell", command]
         if result.returncode != 0:
             if check:
                 raise subprocess.CalledProcessError(
                     result.returncode,
-                    result.args,
+                    cmd_args,
                     output=result.stdout,
                     stderr=result.stderr,
                 )
-            return result
+            return CompletedProcess(cmd_args, result.returncode, result.stdout, result.stderr)
 
         try:
             device_returncode = self._read_device_exit_code(exit_code_file)
         finally:
             self._cleanup_device_file(exit_code_file)
 
-        completed = CompletedProcess(result.args, device_returncode, result.stdout, result.stderr)
+        completed = CompletedProcess(cmd_args, device_returncode, result.stdout, result.stderr)
         if check and completed.returncode != 0:
             raise subprocess.CalledProcessError(
                 completed.returncode,
@@ -124,20 +197,8 @@ class HarmonyDeviceConnector:
             )
         return completed
 
-    def _wait(self, timeout: float = 5) -> None:
-        try:
-            subprocess.run([self.hdc_path, "wait"], timeout=timeout)
-        except subprocess.TimeoutExpired as e:
-            print(f"Failed to find hdc device in {timeout} seconds")
-            raise e
-
-    """Wakeup system and turn screen on"""
-
     def wakeup(self) -> None:
-        self._wait()
         self.cmd("power-shell wakeup")
-
-    """Suspend system and turn screen off"""
 
     def suspend(self) -> None:
         self.cmd("power-shell suspend")
@@ -193,14 +254,11 @@ class HarmonyDeviceConnector:
 
     def _device_file_exists(self, device_filepath: str) -> bool:
         quoted_path = shlex.quote(device_filepath)
-        result = subprocess.run(
-            [
-                self.hdc_path,
-                "shell",
-                f"if [ -f {quoted_path} ]; then echo __HDC_EXISTS__; else echo __HDC_MISSING__; fi",
-            ],
+        result = self.cmd(
+            f"if [ -f {quoted_path} ]; then echo __HDC_EXISTS__; exit 0; fi; echo __HDC_MISSING__; exit 1",
             capture_output=True,
             text=True,
+            check=False,
         )
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)
         if "__HDC_EXISTS__" in output:
@@ -211,19 +269,11 @@ class HarmonyDeviceConnector:
 
     def _device_file_hash(self, device_filepath: str) -> str:
         algorithm = "sha256"
-        template = self._DEVICE_HASH_COMMAND
-
         if not self._device_file_exists(device_filepath):
             raise FileNotFoundError(f"Device file {device_filepath!r} does not exist")
 
         quoted_path = shlex.quote(device_filepath)
-        result = subprocess.run(
-            [self.hdc_path, "shell", template.format(path=quoted_path)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to compute {algorithm} digest for device file {device_filepath}")
+        result = self.cmd(self._DEVICE_HASH_COMMAND.format(path=quoted_path), capture_output=True, text=True)
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)
         digest = self._extract_hash(output)
         if digest is None:
@@ -246,10 +296,10 @@ class HarmonyDeviceConnector:
             if host_hash == device_hash:
                 return
 
-        cmd = [self.hdc_path, "file", "recv", device_filepath]
+        cmd = ["file", "recv", device_filepath]
         if host_filepath is not None:
             cmd.append(host_filepath)
-        subprocess.run(cmd, check=True)
+        self._run_target(cmd, check=True)
 
         algorithm, host_hash, device_hash = self._host_and_device_hashes(resolved_host_path, device_filepath)
         self._verify_matching_hashes(resolved_host_path, device_filepath, algorithm, host_hash, device_hash)
@@ -265,8 +315,7 @@ class HarmonyDeviceConnector:
             if pathlib.Path(host_file).exists():
                 with open(host_file, mode="r", encoding="utf-8") as logfile:
                     return logfile.read()
-            else:
-                return None
+            return None
 
     def send_file(self, host_filepath: str, device_filepath: str) -> None:
         host_path = pathlib.Path(host_filepath)
@@ -278,7 +327,7 @@ class HarmonyDeviceConnector:
             if host_hash == device_hash:
                 return
 
-        subprocess.run([self.hdc_path, "file", "send", host_filepath, device_filepath], check=True)
+        self._run_target(["file", "send", host_filepath, device_filepath], check=True)
 
         algorithm, host_hash, device_hash = self._host_and_device_hashes(host_path, device_filepath)
         self._verify_matching_hashes(host_path, device_filepath, algorithm, host_hash, device_hash)
@@ -291,6 +340,13 @@ class HarmonyDeviceConnector:
         self.recv_file(device_path, host_filepath)
 
 
+class HarmonyDeviceConnector(HarmonyDevice):
+    def __init__(self, hdc_path: Optional[PathLike] = None, target: Optional[str] = None) -> None:
+        hdc = Hdc(hdc_path=hdc_path)
+        device = hdc.connect(target=target)
+        super().__init__(hdc=hdc, target=device.target)
+
+
 class HarmonyDevicePerfMode:
     """
     A helper class to enter performance mode using python `with` syntax.
@@ -299,7 +355,7 @@ class HarmonyDevicePerfMode:
     def __init__(
         self,
         screen_timeout_seconds: int = 600,
-        hdc: Optional[HarmonyDeviceConnector] = None,
+        hdc: Optional[HarmonyDevice] = None,
     ) -> None:
         if hdc is None:
             self.hdc = HarmonyDeviceConnector()
