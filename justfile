@@ -8,7 +8,7 @@ emulator:
 emulator-stop:
   bash scripts/stop-oniro-emulator.sh
 
-test:
+_require-device:
   #!/usr/bin/env bash
   set -euo pipefail
 
@@ -24,7 +24,11 @@ test:
     exit 1
   fi
 
+test: _require-device
   PYTHONPATH=src uv run pytest -q
+
+coverage: _require-device
+  PYTHONPATH=src uv run pytest --cov=hdc_py --cov-report=term-missing
 
 build:
   uv build
