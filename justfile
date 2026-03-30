@@ -1,4 +1,8 @@
 
+alias fmt := format
+alias cov := coverage
+alias t := test
+
 emulator_connect_key := "127.0.0.1:55555"
 device_check_timeout_seconds := "5"
 
