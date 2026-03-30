@@ -203,6 +203,12 @@ class HarmonyDevice:
     def suspend(self) -> None:
         self.cmd("power-shell suspend")
 
+    def mount_system_as_rw(self) -> None:
+        """Set /system /vendor partition read-write
+        This option only affects rooted devices.
+        """
+        self._run_target(["target", "mount"], check=True)
+
     @staticmethod
     def _host_file_hash(host_filepath: PathLike[str] | str, algorithm: str) -> str:
         digest = hashlib.new(algorithm)
