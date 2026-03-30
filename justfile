@@ -28,7 +28,7 @@ test: _require-device
   PYTHONPATH=src uv run pytest -q
 
 coverage: _require-device
-  PYTHONPATH=src uv run pytest --cov=hdc_py --cov-report=term-missing
+  PYTHONPATH=src uv run pytest --cov=hdc_py --cov-branch --cov-report=term-missing
 
 build:
   uv build
