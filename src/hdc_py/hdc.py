@@ -2,6 +2,7 @@ import hashlib
 import os
 import pathlib
 import platform
+import re
 import shlex
 import shutil
 import string
@@ -9,10 +10,11 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from dataclasses import dataclass
 from os import PathLike
 from pathlib import PurePosixPath
 from subprocess import CompletedProcess
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 
 _HASH_BUFFER_SIZE = 1024 * 1024
@@ -69,6 +71,38 @@ class HdcDisconnectedError(HdcConnectionError):
     pass
 
 
+@dataclass(frozen=True)
+class PortForward:
+    target: str
+    first_node: str
+    second_node: str
+    direction: Literal["Forward", "Reverse"]
+
+    @property
+    def local_node(self) -> str:
+        if self.direction == "Forward":
+            return self.first_node
+        return self.second_node
+
+    @property
+    def remote_node(self) -> str:
+        if self.direction == "Forward":
+            return self.second_node
+        return self.first_node
+
+
+@dataclass(frozen=True)
+class PortForwardRemovalResult:
+    first_node: str
+    second_node: str
+    success: bool
+    message: str
+
+    @property
+    def not_found(self) -> bool:
+        return "not exist" in self.message.lower()
+
+
 class Hdc:
     def __init__(self, hdc_path: Optional[PathLike] = None) -> None:
         if hdc_path is not None:
@@ -114,6 +148,9 @@ class Hdc:
 class HarmonyDevice:
     _DEVICE_HASH_COMMAND = "openssl dgst -sha256 {path}"
     _DEVICE_TMP_DIR = "/data/local/tmp"
+    _PORT_NODE_PATTERN = re.compile(
+        r"(?:(?<=^)|(?<=\s))(tcp:|localfilesystem:|localreserved:|localabstract:|dev:|jdwp:)"
+    )
 
     def __init__(self, hdc: Hdc, target: str) -> None:
         if not target:
@@ -208,6 +245,115 @@ class HarmonyDevice:
         This option only affects rooted devices.
         """
         self._run_target(["target", "mount"], check=True)
+
+    @staticmethod
+    def _parse_port_forward(line: str) -> PortForward:
+        match = re.match(r"^(?P<target>\S+)\s+(?P<body>.+)\s+\[(?P<direction>Forward|Reverse)\]$", line)
+        if match is None:
+            raise RuntimeError(f"Could not parse port forward entry: {line!r}")
+        target = match.group("target")
+        body = match.group("body")
+        normalized_direction = match.group("direction")
+        node_matches = list(HarmonyDevice._PORT_NODE_PATTERN.finditer(body))
+        if len(node_matches) < 2:
+            raise RuntimeError(f"Could not parse port forward nodes: {line!r}")
+        first_node = body[node_matches[0].start() : node_matches[1].start()].rstrip()
+        second_node = body[node_matches[1].start() :].strip()
+        return PortForward(
+            target=target,
+            first_node=first_node,
+            second_node=second_node,
+            direction=normalized_direction,
+        )
+
+    def _run_port_command(self, args: list[str], success_fragment: str) -> str:
+        result = self._run_target(args, check=False, capture_output=True, text=True)
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode,
+                result.args,
+                output=result.stdout,
+                stderr=result.stderr,
+            )
+        normalized_output = output.lower()
+        if success_fragment.lower() in normalized_output:
+            return output
+        if "[fail]" in normalized_output or "failed" in normalized_output:
+            raise RuntimeError(output)
+        return output
+
+    def _existing_port_forward_conflict(
+        self,
+        first_node: str,
+        second_node: str,
+        direction: Literal["Forward", "Reverse"],
+    ) -> Optional[PortForward]:
+        for port_forward in self.list_port_forwards():
+            if port_forward.target != self.target or port_forward.direction != direction:
+                continue
+            if port_forward.first_node != first_node:
+                continue
+            if port_forward.second_node == second_node:
+                return port_forward
+            raise RuntimeError(
+                "A different port forward already exists for "
+                f"{first_node!r} on target {self.target!r}. Remove the existing forward rule first."
+            )
+        return None
+
+    def list_port_forwards(self) -> list[PortForward]:
+        result = self._run_target(["fport", "ls"], check=True, capture_output=True, text=True)
+        forwards: list[PortForward] = []
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped == "[Empty]":
+                continue
+            forwards.append(self._parse_port_forward(stripped))
+        return forwards
+
+    def forward_port(self, local_node: str, remote_node: str) -> PortForward:
+        existing = self._existing_port_forward_conflict(local_node, remote_node, "Forward")
+        if existing is not None:
+            return existing
+        self._run_port_command(["fport", local_node, remote_node], "Forwardport result:OK")
+        return PortForward(self.target, local_node, remote_node, "Forward")
+
+    def reverse_port(self, remote_node: str, local_node: str) -> PortForward:
+        existing = self._existing_port_forward_conflict(remote_node, local_node, "Reverse")
+        if existing is not None:
+            return existing
+        self._run_port_command(["rport", remote_node, local_node], "Forwardport result:OK")
+        return PortForward(self.target, remote_node, local_node, "Reverse")
+
+    def remove_port_forward(
+        self,
+        port_forward: PortForward | str,
+        second_node: Optional[str] = None,
+    ) -> PortForwardRemovalResult:
+        if isinstance(port_forward, PortForward):
+            if port_forward.target != self.target:
+                raise ValueError(
+                    f"Port forward belongs to different target {port_forward.target!r}; expected {self.target!r}"
+                )
+            first_node = port_forward.first_node
+            second_node = port_forward.second_node
+        elif second_node is None:
+            raise ValueError("second_node is required when removing a port forward by endpoint strings")
+        else:
+            first_node = port_forward
+        result = self._run_target(
+            ["fport", "rm", first_node, second_node],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        normalized_output = output.lower()
+        success = "remove forward ruler success" in normalized_output
+        if not success and "[fail]" not in normalized_output and "failed" not in normalized_output:
+            success = result.returncode == 0
+        return PortForwardRemovalResult(first_node, second_node, success, output)
 
     @staticmethod
     def _host_file_hash(host_filepath: PathLike[str] | str, algorithm: str) -> str:
