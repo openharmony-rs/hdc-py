@@ -120,7 +120,7 @@ class Hdc:
         try:
             self._run(["wait"], timeout=timeout)
         except subprocess.TimeoutExpired as e:
-            print(f"Failed to find hdc device in {timeout} seconds")
+            print(f"Failed to find hdc device in {timeout} seconds", file=sys.stderr)
             raise e
 
     def list_targets(self) -> list[str]:
@@ -198,7 +198,7 @@ class HarmonyDevice:
 
     def cmd(self, command: str, **kwargs) -> CompletedProcess:  # noqa: ANN003
         check = kwargs.pop("check", True)
-        print(f"Executing hdc command on {self.target}: {command}")
+        print(f"Executing hdc command on {self.target}: {command}", file=sys.stderr)
 
         exit_code_file = self._device_temp_path("hdc-py-exit-code")
         quoted_exit_code_file = shlex.quote(exit_code_file)
@@ -532,4 +532,4 @@ class HarmonyDevicePerfMode:
             self.hdc.cmd("power-shell setmode 600")
             self.hdc.cmd("power-shell timeout -r")
         except Exception as e:
-            print(f"Warning: Failed to restore power-shell settings: {e}")
+            print(f"Warning: Failed to restore power-shell settings: {e}", file=sys.stderr)
