@@ -1,4 +1,6 @@
+import logging
 import os
+import sys
 from pathlib import Path
 import shlex
 import subprocess
@@ -16,6 +18,7 @@ from hdc_py import (
     HarmonyDeviceConnector,
     HarmonyDevicePerfMode,
 )
+from hdc_py import hdc as hdc_module
 
 
 REMOTE_TMP_DIR = "/data/local/tmp/hdc-py-tests"
@@ -67,6 +70,63 @@ def _fake_device(tmp_path: Path, command_handler: str, target: str = "fake-targe
     )
     fake_hdc.chmod(0o755)
     return HarmonyDevice(Hdc(hdc_path=fake_hdc), target)
+
+
+def test_enable_line_buffered_stdio_on_non_tty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    output_path = tmp_path / "stdio.txt"
+    with output_path.open("w", buffering=-1) as stream:
+        assert stream.line_buffering is False
+        monkeypatch.setattr(hdc_module.sys, "stdout", stream)
+        monkeypatch.setattr(hdc_module.sys, "stderr", stream)
+        hdc_module._enable_line_buffered_stdio()
+        assert stream.line_buffering is True
+
+
+def test_hdc_logger_uses_flushing_stderr_handler() -> None:
+    handlers = [handler for handler in hdc_module.logger.handlers if isinstance(handler, logging.StreamHandler)]
+    assert handlers
+    assert any(handler.stream is sys.stderr for handler in handlers)
+    assert hdc_module.logger.level <= logging.INFO
+
+
+def test_hdc_logger_flushes_each_record() -> None:
+    read_fd, write_fd = os.pipe()
+    writer = os.fdopen(write_fd, "w")
+    reader = os.fdopen(read_fd, "r")
+    handler = logging.StreamHandler(writer)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    hdc_module.logger.addHandler(handler)
+    try:
+        os.set_blocking(read_fd, False)
+        hdc_module.logger.info("ci-visible")
+        try:
+            output = reader.read()
+        except BlockingIOError:
+            output = ""
+        assert "ci-visible" in output
+    finally:
+        hdc_module.logger.removeHandler(handler)
+        writer.close()
+        reader.close()
+
+
+def test_wait_logs_when_no_device_is_found(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    fake_hdc = tmp_path / "fake-hdc"
+    fake_hdc.write_text("#!/bin/sh\nexec sleep 30\n", encoding="utf-8")
+    fake_hdc.chmod(0o755)
+    hdc = Hdc(hdc_path=fake_hdc)
+    with caplog.at_level(logging.WARNING, logger=hdc_module.logger.name):
+        with pytest.raises(subprocess.TimeoutExpired):
+            hdc.wait(timeout=0.2)
+    assert "Failed to find hdc device in 0.2 seconds" in caplog.text
+
+
+def test_cmd_logs_the_device_command(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    device = _fake_device(tmp_path, "exit 0")
+    with caplog.at_level(logging.INFO, logger=hdc_module.logger.name):
+        with pytest.raises(RuntimeError, match="Could not read device exit code"):
+            device.cmd("echo hi", capture_output=True, text=True)
+    assert "Executing hdc command on fake-target: echo hi" in caplog.text
 
 
 def test_hdc_resolves_hdc_binary() -> None:

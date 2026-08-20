@@ -1,4 +1,6 @@
 import hashlib
+import io
+import logging
 import os
 import pathlib
 import platform
@@ -18,6 +20,39 @@ from typing import Any, Literal, Optional
 
 
 _HASH_BUFFER_SIZE = 1024 * 1024
+
+logger = logging.getLogger(__name__)
+
+
+def _enable_line_buffered_stdio() -> None:
+    """Line-buffer stdout/stderr when they are not TTYs so CI sees logs promptly."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            if stream.isatty():
+                continue
+            reconfigure(line_buffering=True)
+        except (OSError, ValueError, io.UnsupportedOperation):
+            continue
+
+
+def _install_default_handler() -> None:
+    """Log to stderr. StreamHandler flushes after each record."""
+    if logger.handlers:
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+
+_enable_line_buffered_stdio()
+_install_default_handler()
 
 
 def _is_wsl() -> bool:
@@ -120,7 +155,7 @@ class Hdc:
         try:
             self._run(["wait"], timeout=timeout)
         except subprocess.TimeoutExpired as e:
-            print(f"Failed to find hdc device in {timeout} seconds", file=sys.stderr)
+            logger.warning("Failed to find hdc device in %s seconds", timeout)
             raise e
 
     def list_targets(self) -> list[str]:
@@ -198,7 +233,7 @@ class HarmonyDevice:
 
     def cmd(self, command: str, **kwargs) -> CompletedProcess:  # noqa: ANN003
         check = kwargs.pop("check", True)
-        print(f"Executing hdc command on {self.target}: {command}", file=sys.stderr)
+        logger.info("Executing hdc command on %s: %s", self.target, command)
 
         exit_code_file = self._device_temp_path("hdc-py-exit-code")
         quoted_exit_code_file = shlex.quote(exit_code_file)
@@ -532,4 +567,4 @@ class HarmonyDevicePerfMode:
             self.hdc.cmd("power-shell setmode 600")
             self.hdc.cmd("power-shell timeout -r")
         except Exception as e:
-            print(f"Warning: Failed to restore power-shell settings: {e}", file=sys.stderr)
+            logger.warning("Failed to restore power-shell settings: %s", e)
