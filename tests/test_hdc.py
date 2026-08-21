@@ -43,7 +43,14 @@ def _random_tcp_node() -> str:
 
 # _fake_device is a last resort to mock `hdc` output for error cases that are hard to trigger.
 # We should always prefer using real hdc commands to test behavior.
-def _fake_device(tmp_path: Path, command_handler: str, target: str = "fake-target") -> HarmonyDevice:
+def _fake_device(
+    tmp_path: Path,
+    command_handler: str,
+    target: str = "fake-target",
+    list_targets_output: str | None = None,
+) -> HarmonyDevice:
+    if list_targets_output is None:
+        list_targets_output = target
     fake_hdc = tmp_path / "fake-hdc"
     fake_hdc.write_text(
         "\n".join(
@@ -51,7 +58,7 @@ def _fake_device(tmp_path: Path, command_handler: str, target: str = "fake-targe
                 "#!/bin/sh",
                 "set -eu",
                 'if [ "$1" = "list" ] && [ "$2" = "targets" ]; then',
-                f"  printf '{target}\\n'",
+                f"  printf '%s\\n' '{list_targets_output}'",
                 "  exit 0",
                 "fi",
                 f'if [ "$1" = "-t" ] && [ "$2" = "{target}" ]; then',
@@ -104,6 +111,20 @@ def test_hdc_connect_raises_for_unknown_target() -> None:
     hdc = Hdc()
     with pytest.raises(HdcTargetNotFoundError):
         hdc.connect(target="definitely-not-a-connected-target")
+
+
+def test_list_targets_treats_empty_marker_as_no_devices(tmp_path: Path) -> None:
+    device = _fake_device(tmp_path, "exit 0", list_targets_output="[Empty]")
+    assert device.hdc.list_targets() == []
+    with pytest.raises(HdcTargetNotFoundError, match="No connected hdc devices were found"):
+        device.hdc.connect()
+
+
+def test_list_targets_keeps_connected_fake_target(tmp_path: Path) -> None:
+    device = _fake_device(tmp_path, "exit 0")
+    assert device.hdc.list_targets() == ["fake-target"]
+    connected = device.hdc.connect()
+    assert connected.target == "fake-target"
 
 
 def test_harmony_device_connector_compatibility_wrapper_accepts_target() -> None:
