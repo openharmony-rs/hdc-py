@@ -125,7 +125,13 @@ class Hdc:
 
     def list_targets(self) -> list[str]:
         result = self._run(["list", "targets"], check=True, capture_output=True, text=True)
-        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        targets: list[str] = []
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped == "[Empty]":
+                continue
+            targets.append(stripped)
+        return targets
 
     def is_target_connected(self, target: str) -> bool:
         return target in self.list_targets()
