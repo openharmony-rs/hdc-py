@@ -15,6 +15,16 @@ device = hdc.connect()  # or hdc.connect(target="127.0.0.1:55555")
 result = device.cmd("echo hello", capture_output=True, text=True)
 ```
 
+`cmd()` reports the command's real exit code. `hdc shell` doesn't pass it on, so `cmd()` saves it to a file on
+the device and reads it back, which takes four more hdc calls. When the output tells you the result, or the
+result doesn't matter, `cmd_without_exit_code()` makes a single call instead. It raises only if the command
+didn't start on the device; whether it succeeded is unknown:
+
+```python
+sent = device.cmd_without_exit_code("param get const.product.model")
+print(sent.output)  # stdout and stderr, interleaved
+```
+
 `HarmonyDeviceConnector` remains available as a compatibility wrapper around a concrete connected device.
 
 hdc-py is meant to make writing scripts for testing on OpenHarmony devices easier,

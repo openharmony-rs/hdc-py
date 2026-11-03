@@ -10,6 +10,7 @@ from hdc_py import (
     Hdc,
     HdcAmbiguousTargetError,
     HdcDisconnectedError,
+    HdcError,
     HdcTargetNotFoundError,
     PortForward,
     HarmonyDevice,
@@ -159,6 +160,119 @@ def test_device_cmd_raises_for_disconnected_target() -> None:
     device = HarmonyDevice(Hdc(), "definitely-not-a-connected-target")
     with pytest.raises(HdcDisconnectedError):
         device.cmd("echo should-not-run", capture_output=True, text=True, check=False)
+
+
+def test_cmd_without_exit_code_returns_output() -> None:
+    device = _connected_device()
+    sent = device.cmd_without_exit_code("echo hello-world!")
+    assert sent.command == "echo hello-world!"
+    assert sent.output.strip() == "hello-world!"
+
+
+def test_cmd_without_exit_code_returns_stdout_and_stderr() -> None:
+    device = _connected_device()
+    sent = device.cmd_without_exit_code("echo to-stdout; echo to-stderr >&2")
+    assert sent.output.split() == ["to-stdout", "to-stderr"]
+
+
+def test_cmd_without_exit_code_does_not_report_a_failing_command() -> None:
+    device = _connected_device()
+    sent = device.cmd_without_exit_code("echo failing-command; exit 23")
+    assert sent.output.strip() == "failing-command"
+    assert not hasattr(sent, "returncode")
+
+
+def test_cmd_without_exit_code_replaces_invalid_utf8() -> None:
+    device = _connected_device()
+    sent = device.cmd_without_exit_code("printf 'a\\377b'")
+    assert sent.output == "a�b"
+
+
+def test_cmd_without_exit_code_times_out() -> None:
+    device = _connected_device()
+    with pytest.raises(subprocess.TimeoutExpired) as exc_info:
+        device.cmd_without_exit_code("echo started; sleep 5", timeout=2)
+    assert exc_info.value.output == b"started\n"
+    assert exc_info.value.cmd[-1] == "echo started; sleep 5"
+
+
+def test_cmd_without_exit_code_rejects_empty_command() -> None:
+    device = HarmonyDevice(Hdc(), "definitely-not-a-connected-target")
+    with pytest.raises(ValueError, match="must not be empty"):
+        device.cmd_without_exit_code("  ")
+
+
+def test_cmd_without_exit_code_raises_for_disconnected_target() -> None:
+    device = HarmonyDevice(Hdc(), "definitely-not-a-connected-target")
+    with pytest.raises(HdcDisconnectedError):
+        device.cmd_without_exit_code("echo should-not-run")
+
+
+def test_cmd_without_exit_code_returns_output_that_looks_like_an_hdc_error() -> None:
+    device = _connected_device()
+    sent = device.cmd_without_exit_code("echo '[Fail] printed by the command'")
+    assert sent.output.strip() == "[Fail] printed by the command"
+
+
+def test_cmd_without_exit_code_counts_a_shell_syntax_error_as_sent() -> None:
+    device = _connected_device()
+    sent = device.cmd_without_exit_code("if then")
+    assert "syntax error" in sent.output
+
+
+def test_cmd_without_exit_code_gives_the_command_an_empty_stdin() -> None:
+    device = _connected_device()
+    sent = device.cmd_without_exit_code("cat; echo done", timeout=10)
+    assert sent.output == "done\n"
+
+
+def test_cmd_without_exit_code_raises_when_hdc_exits_nonzero(tmp_path: Path) -> None:
+    device = _fake_device(
+        tmp_path,
+        "\n".join(
+            [
+                'if [ "$1" = "shell" ]; then',
+                "  printf 'transport error\\n' >&2",
+                "  exit 7",
+                "fi",
+            ]
+        ),
+    )
+    with pytest.raises(HdcError, match="transport error"):
+        device.cmd_without_exit_code("echo hello")
+
+
+def test_cmd_without_exit_code_raises_for_an_hdc_error_message(tmp_path: Path) -> None:
+    device = _fake_device(
+        tmp_path,
+        "\n".join(
+            [
+                'if [ "$1" = "shell" ]; then',
+                "  printf '[Fail][E000004]:The communication channel is being established.\\r\\n'",
+                "  printf 'Please wait for several seconds and try again.'",
+                "  exit 0",
+                "fi",
+            ]
+        ),
+    )
+    with pytest.raises(HdcError, match="E000004") as exc_info:
+        device.cmd_without_exit_code("echo hello")
+    assert not isinstance(exc_info.value, HdcDisconnectedError)
+
+
+def test_cmd_without_exit_code_raises_when_the_device_prints_nothing(tmp_path: Path) -> None:
+    device = _fake_device(
+        tmp_path,
+        "\n".join(
+            [
+                'if [ "$1" = "shell" ]; then',
+                "  exit 0",
+                "fi",
+            ]
+        ),
+    )
+    with pytest.raises(HdcError, match="no output"):
+        device.cmd_without_exit_code("echo hello")
 
 
 def test_forward_port_can_be_listed_and_removed() -> None:
