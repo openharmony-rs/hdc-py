@@ -103,6 +103,18 @@ class PortForwardRemovalResult:
         return "not exist" in self.message.lower()
 
 
+@dataclass(frozen=True)
+class SentCommand:
+    """A shell command that hdc delivered to the device, and what it printed.
+
+    Whether the command succeeded is unknown: `hdc shell` doesn't report its exit code.
+    """
+
+    command: str
+    # stdout and stderr of the command, interleaved: hdc returns both on one stream.
+    output: str
+
+
 class Hdc:
     def __init__(self, hdc_path: Optional[PathLike] = None) -> None:
         if hdc_path is not None:
@@ -154,6 +166,7 @@ class Hdc:
 class HarmonyDevice:
     _DEVICE_HASH_COMMAND = "openssl dgst -sha256 {path}"
     _DEVICE_TMP_DIR = "/data/local/tmp"
+    _SENT_MARKER = "__hdc_py_sent__"
     _PORT_NODE_PATTERN = re.compile(
         r"(?:(?<=^)|(?<=\s))(tcp:|localfilesystem:|localreserved:|localabstract:|dev:|jdwp:)"
     )
@@ -239,6 +252,48 @@ class HarmonyDevice:
                 stderr=completed.stderr,
             )
         return completed
+
+    def cmd_without_exit_code(self, command: str, timeout: Optional[float] = None) -> SentCommand:
+        """Run `command` in the device shell with a single `hdc shell` call and return what it printed.
+
+        This raises only if the command didn't start on the device. Whether it succeeded is unknown, because
+        `hdc shell` exits with 0 whatever the command's exit code. Use this when the output tells you the
+        result, or when the result doesn't matter; `cmd()` reports the real exit code, at the cost of four
+        more hdc calls.
+
+        The command's stdin is empty. On `timeout` (seconds), `subprocess.TimeoutExpired` is raised, with the
+        output so far as bytes, and the command may still be running.
+        """
+        if not command.strip():
+            raise ValueError("command must not be empty")
+        print(f"Executing hdc command on {self.target}: {command}", file=sys.stderr)
+        # hdc exits with 0 even when it can't reach the device, and prints its errors like command output. The
+        # marker line, printed by the device before it runs `command`, shows that the command was delivered.
+        # hdc never closes the command's stdin, so a command that reads it would wait for the timeout.
+        # `eval` keeps the whole command on one line, which Windows wrappers such as `hdc.cmd` would cut.
+        marker = self._SENT_MARKER + "\n"
+        try:
+            result = self._run_target(
+                ["shell", f"exec </dev/null; echo {self._SENT_MARKER}; eval {shlex.quote(command)}"],
+                verify_connected=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            output = e.output.removeprefix(marker.encode()) if isinstance(e.output, bytes) else e.output
+            raise subprocess.TimeoutExpired(
+                [self.hdc_path, "-t", self.target, "shell", command], e.timeout, output=output
+            ) from None
+        if result.returncode == 0 and result.stdout.startswith(marker):
+            return SentCommand(command, result.stdout[len(marker) :])
+        message = result.stdout.strip() or f"no output, hdc exit code {result.returncode}"
+        if not self.hdc.is_target_connected(self.target):
+            raise HdcDisconnectedError(f"Target {self.target!r} is not connected: {message}")
+        raise HdcError(f"hdc did not run {command!r} on {self.target}: {message}")
 
     def wakeup(self) -> None:
         self.cmd("power-shell wakeup")
