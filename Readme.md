@@ -3,7 +3,7 @@
 A Python wrapper around the (Open)Harmony Device Connector `hdc`.
 Using the library requires the `hdc` tool to already be installed.
 
-Release notes and migration guide: [CHANGELOG.md](/Users/jschwender/Dev/hdc-py/CHANGELOG.md)
+Release notes: [CHANGELOG.md](https://github.com/openharmony-rs/hdc-py/blob/main/CHANGELOG.md)
 
 The API is split into global `hdc` operations and target-specific device operations:
 
